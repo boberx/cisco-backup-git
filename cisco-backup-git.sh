@@ -2,20 +2,22 @@
 
 RS=0;
 
-R1="^([0-9]{1,2})@([a-z]+)@([a-z]+)@([a-z]+)@([0-9a-zA-Z\.|]+)@([0-9a-zA-Z\.|#]+)@([0-9A-Za-z\.\-]+)@([0-9]+)$";
-
-SSHC="/usr/bin/ssh -4 -p 22 -oStrictHostKeyChecking=no -oPreferredAuthentications=password ";
-SSHC+="-oNumberOfPasswordPrompts=1 -oPubkeyAuthentication=no -oConnectTimeout=5 ";
-SSHC+="-oKexAlgorithms=+diffie-hellman-group1-sha1";
-
-# копирует файлы по симлинкам и это, похоже, никак не исправить (rsync?)
-SCPC="/usr/bin/scp -4 -r -oStrictHostKeyChecking=no -oPreferredAuthentications=password ";
-SCPC+="-oNumberOfPasswordPrompts=1 -oPubkeyAuthentication=no -oConnectTimeout=5";
+R1="^([0-9]{1,2})@([a-z]+)@([a-z]+)@([a-z]+)@([0-9a-zA-Z\.|]+)@([0-9a-zA-Z\.|#]+)@([0-9A-Za-z\.\-]+)@([0-9]+)(@([0-9A-Za-z]+))?$";
 
 DEVFILE="";
 GITDIR="";
 DLST="";
 CMNT="";
+
+NC="/bin/nc";
+EXPECT="/usr/bin/expect";
+
+knock_knock_std()
+{
+	for p in 4895 5895 6895 7895; do
+		"${NC}" -z -q 1 -i 1 -w 1 "${1}" "${p}";
+	done;
+}
 
 while getopts ":d:f:n:c:" opt; do
 	case $opt in
@@ -31,7 +33,9 @@ done;
 GITDIR=`sed 's/\/$//' <<<"${GITDIR}"`;
 GITDIR=`realpath "${GITDIR}"`;
 
-if [ ! -d "${GITDIR}" ]; then
+if [ ! -x "${EXPECT}" ] || [ ! -x "${NC}" ]; then
+	echo "expect or nc not found";
+else if [ ! -d "${GITDIR}" ]; then
 	echo "GIT folder does not exit";
 else if [ ! -f "${DEVFILE}" ]; then
 	echo "File not found: "${DEVFILE}"";
@@ -47,6 +51,7 @@ if [ ${?} -eq 0 ]; then while read L; do if [[ ${L} =~ ${R1} ]]; then
 	ENBL="${BASH_REMATCH[6]}";
 	HOST="${BASH_REMATCH[7]}";
 	PORT="${BASH_REMATCH[8]}";
+	ADON="${BASH_REMATCH[10]}";
 
 	if [ -n "${DLST}" ]; then
 		if ! [[ " ${DLST} " =~ " ${HNUM} " ]]; then
@@ -56,9 +61,45 @@ if [ ${?} -eq 0 ]; then while read L; do if [[ ${L} =~ ${R1} ]]; then
 
 	FILE=""${GITDIR}"/"${HOST}".cfg";
 
+	SSHC="/usr/bin/ssh -4 -p ";
+	SSHC+=""${PORT}" ";
+	SSHC+="-oStrictHostKeyChecking=no -oPreferredAuthentications=password ";
+	SSHC+="-oNumberOfPasswordPrompts=1 -oPubkeyAuthentication=no -oConnectTimeout=5 ";
+	SSHC+="-oKexAlgorithms=+diffie-hellman-group1-sha1";
+
+	# копирует файлы по симлинкам и это, похоже, никак не исправить (rsync?)
+	SCPC="/usr/bin/scp -4 -r -P ";
+	SCPC+=""${PORT}" ";
+	SCPC+="-oStrictHostKeyChecking=no -oPreferredAuthentications=password ";
+	SCPC+="-oNumberOfPasswordPrompts=1 -oPubkeyAuthentication=no -oConnectTimeout=5";
+
+	RSYNCC="/usr/bin/rsync --delete-excluded -r -a -p -e \"ssh -p ";
+	RSYNCC+=""${PORT}" ";
+	RSYNCC+="-oStrictHostKeyChecking=no ";
+	RSYNCC+="-oPreferredAuthentications=password,keyboard-interactive -oNumberOfPasswordPrompts=1 ";
+	RSYNCC+="-oPubkeyAuthentication=no -oConnectTimeout=5\"";
+
 	case "${HTYP}" in
 		"linux")
 			case "${STYP}" in
+				"rsync")
+					mkdir -p "${GITDIR}"/"${HOST}"/ || exit 1;
+					expc="set timeout 120\n";
+					expc+="log_user 0\n";
+					expc+="spawn "${RSYNCC}" "${USER}"@"${HOST}":/etc/ "${GITDIR}"/"${HOST}"/etc/\n";
+					expc+="while 1 {\n";
+					expc+="expect {\n";
+					expc+="\"*Could not resolve*\" { send_user 'Temporary\ failure\ in\ nameresolution'; exit 1 }\n";
+					expc+="\"*assword:\" { send -- ""${PASS}""\\\r\\\n }\n";
+					expc+="\"*refused*\" { send_user 'refused'; exit 1 }\n";
+					expc+="\"*not known*\" { send_user 'notknown'; exit 1 }\n";
+					expc+="\"*command not found*\" { send_user 'rsync\ not\ found'; exit 1 }\n";
+					expc+="timeout { send_user 'timeout'; exit 1 }\n";
+					expc+="eof { exit 0 }\n";
+					expc+="}\n";
+					expc+="}\n";
+					expc+="exit 1\n";
+					;;
 				"scp")
 					mkdir -p "${GITDIR}"/"${HOST}"/ || exit 1;
 
@@ -146,6 +187,10 @@ if [ ${?} -eq 0 ]; then while read L; do if [[ ${L} =~ ${R1} ]]; then
 			;;
 	esac;
 
+	if [ "${ADON}" == "knock" ]; then
+		knock_knock_std "${HOST}";
+	fi;
+
 	size=0;
 	outex=$(echo -e "${expc}" | /usr/bin/expect -nN -f -);
 
@@ -153,7 +198,7 @@ if [ ${?} -eq 0 ]; then while read L; do if [[ ${L} =~ ${R1} ]]; then
 		case "${HTYP}" in
 			"linux")
 				case "${STYP}" in
-					"scp")
+					"scp" | "rsync")
 						size=$(du -bs "${GITDIR}"/"${HOST}" | cut -f 1);
 						if [ ${size} -ge 5000 ]; then
 							echo "OK: "${HOST}"";
@@ -190,6 +235,7 @@ fi;
 done < <(egrep -v "^( +)?#.*$|^$" "${DEVFILE}" | sort -u);
 if [ ${CHANGES} -eq 1 ]; then
 	git -C "${GITDIR}" commit -m "$(hostname).$(dnsdomainname) $(date +%Y-%m-%d_%H.%M.%S) ${CMNT}" && git -C "${GITDIR}" push;
+fi;
 fi;
 fi;
 fi;
