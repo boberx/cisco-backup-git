@@ -2,29 +2,38 @@
 
 RS=0;
 
-R1="^([0-9]{1,2})@([a-z]+)@([a-z]+)@([a-z]+)@([0-9a-zA-Z\.|]+)@([0-9a-zA-Z\.|#]+)@([0-9A-Za-z\.\-]+)@([0-9]+)(@([0-9A-Za-z]+))?$";
+R1="^([0-9]{1,3})@([a-z]+)@([a-z]+)@([a-z]+)@([0-9a-zA-Z\.|]+)@([0-9a-zA-Z\.|#]+)@([0-9A-Za-z\.\-]+)@([0-9]+)(@([0-9A-Za-z]+))?$";
 
 DEVFILE="";
+DEVFILEPASS="";
 GITDIR="";
 DLST="";
 CMNT="";
+DOLS=0;
 
-NC="/bin/nc";
+NC=$(which nc ncat | head -n 1);
+
 EXPECT="/usr/bin/expect";
+OPENSSL="/usr/bin/openssl";
+
+# openssl enc -in foo.bar -aes-256-cbc -md SHA256 -pass stdin > foo.bar.enc
+# openssl enc -in foo.bar.enc -d -aes-256-cbc -md SHA256 -pass stdin > foo.bar
 
 knock_knock_std()
 {
 	for p in 4895 5895 6895 7895; do
-		"${NC}" -z -q 1 -i 1 -w 1 "${1}" "${p}";
+		"${NC}" -z -i 1 -w 1 "${1}" "${p}";
 	done;
 }
 
-while getopts ":d:f:n:c:" opt; do
+while getopts ":d:f:n:c:pl" opt; do
 	case $opt in
 		f) DEVFILE="${OPTARG}";;
 		d) GITDIR="${OPTARG}";;
 		n) DLST="${OPTARG}";;
 		c) CMNT="${OPTARG}";;
+		l) DOLS=1;;
+		p) read -s -p "DEVFILE Password: " DEVFILEPASS;;
 		:) echo "Option -$OPTARG requires an argument." >&2;;
 		\?) echo "Invalid option: -$OPTARG" >&2;;
 	esac;
@@ -32,6 +41,8 @@ done;
 
 GITDIR=`sed 's/\/$//' <<<"${GITDIR}"`;
 GITDIR=`realpath "${GITDIR}"`;
+
+echo "";
 
 if [ ! -x "${EXPECT}" ] || [ ! -x "${NC}" ]; then
 	echo "expect or nc not found";
@@ -59,6 +70,11 @@ if [ ${?} -eq 0 ]; then while read L; do if [[ ${L} =~ ${R1} ]]; then
 		fi;
 	fi;
 
+	if [ "${DOLS}" -eq 1 ]; then
+		echo "${L}";
+		continue;
+	fi;
+
 	FILE=""${GITDIR}"/"${HOST}".cfg";
 
 	SSHC="/usr/bin/ssh -4 -p ";
@@ -79,6 +95,13 @@ if [ ${?} -eq 0 ]; then while read L; do if [[ ${L} =~ ${R1} ]]; then
 	RSYNCC+="-oPreferredAuthentications=password,keyboard-interactive -oNumberOfPasswordPrompts=1 ";
 	RSYNCC+="-oPubkeyAuthentication=no -oConnectTimeout=5\"";
 
+	RSYNCSUDOC="/usr/bin/rsync --delete-excluded --rsync-path \"sudo -S rsync\" -r -a -p -e \"ssh -p ";
+#	RSYNCSUDOC="/usr/bin/rsync --delete-excluded -r -a -p -e \"ssh -p ";
+	RSYNCSUDOC+=""${PORT}" ";
+	RSYNCSUDOC+="-oStrictHostKeyChecking=no ";
+	RSYNCSUDOC+="-oPreferredAuthentications=password,keyboard-interactive -oNumberOfPasswordPrompts=1 ";
+	RSYNCSUDOC+="-oPubkeyAuthentication=no -oConnectTimeout=5\" ";
+
 	case "${HTYP}" in
 		"linux")
 			case "${STYP}" in
@@ -91,6 +114,26 @@ if [ ${?} -eq 0 ]; then while read L; do if [[ ${L} =~ ${R1} ]]; then
 					expc+="expect {\n";
 					expc+="\"*Could not resolve*\" { send_user 'Temporary\ failure\ in\ nameresolution'; exit 1 }\n";
 					expc+="\"*assword:\" { send -- ""${PASS}""\\\r\\\n }\n";
+					expc+="\"*refused*\" { send_user 'refused'; exit 1 }\n";
+					expc+="\"*not known*\" { send_user 'notknown'; exit 1 }\n";
+					expc+="\"*command not found*\" { send_user 'rsync\ not\ found'; exit 1 }\n";
+					expc+="timeout { send_user 'timeout'; exit 1 }\n";
+					expc+="eof { exit 0 }\n";
+					expc+="}\n";
+					expc+="}\n";
+					expc+="exit 1\n";
+					;;
+				"rsyncsudo")
+#					echo "spawn "${RSYNCSUDOC}" "${USER}"@"${HOST}":/etc/ "${GITDIR}"/"${HOST}"/etc/\n";
+					mkdir -p "${GITDIR}"/"${HOST}"/ || exit 1;
+					expc="set timeout 120\n";
+					expc+="log_user 0\n";
+					expc+="spawn "${RSYNCSUDOC}" "${USER}"@"${HOST}":/etc/ "${GITDIR}"/"${HOST}"/etc/\n";
+					expc+="while 1 {\n";
+					expc+="expect {\n";
+					expc+="\"*Could not resolve*\" { send_user 'Temporary\ failure\ in\ nameresolution'; exit 1 }\n";
+					expc+="\"*assword:\" { send -- ""${PASS}""\\\r\\\n }\n";
+					expc+="\"\[sudo\] *:\" { send -- ""${PASS}""\\\r\\\n }\n";
 					expc+="\"*refused*\" { send_user 'refused'; exit 1 }\n";
 					expc+="\"*not known*\" { send_user 'notknown'; exit 1 }\n";
 					expc+="\"*command not found*\" { send_user 'rsync\ not\ found'; exit 1 }\n";
@@ -116,6 +159,42 @@ if [ ${?} -eq 0 ]; then while read L; do if [[ ${L} =~ ${R1} ]]; then
 					expc+="eof { exit 0 }\n";
 					expc+="}\n";
 					expc+="}\n";
+					expc+="exit 1\n";
+					;;
+				*)
+					expc="send_user 'unknown'\nexit 1\n";
+					;;
+			esac;
+			;;
+		"ibmbnt")
+			case "${STYP}" in
+				"tel")
+					expc="set timeout 3\n";
+					expc+="log_user 0\n";
+					expc+="spawn telnet "${HOST}" "${PORT}"\n";
+
+					expc+="while 1 {\n";
+					expc+="expect {\n";
+					expc+="\"*Could not resolve*\" { send_user 'Temporary\ failure\ in\ nameresolution'; exit 1 }\n";
+					expc+="\"*Enter  password:\" { send -- ""${PASS}""\\\r\\\n }\n";
+					expc+="\"*refused*\" { send_user 'refused'; exit 1 }\n";
+					expc+="\"*not known*\" { send_user 'notknown'; exit 1 }\n";
+					expc+="\"*Password incorrect.\" { send_user 'password\ incorrect'; exit 1 }\n";
+					expc+="\"*Main#\" { send -- \"cfg\\\r\\\n\"; sleep 1; break }\n";
+					expc+="timeout { send_user 'timeout'; exit 1 }\n";
+					expc+="eof { send_user 'eof'; exit 1 }\n";
+					expc+="}\n";
+					expc+="}\n";
+
+					expc+="expect \"*Configuration#\" { send -- \"lines 0\\\r\\\n\"; sleep 1 }\n";
+
+					expc+="expect \"*Configuration#\" { send -- \"dump\\\r\\\n\" }\n";
+
+					expc+="log_user 1\n";
+
+					expc+="expect \"*Configuration#\" { log_user 0; send -- \"exit\\\r\\\n\"; exit 0 }\n";
+
+					expc+="log_user 0\n";
 					expc+="exit 1\n";
 					;;
 				*)
@@ -198,7 +277,7 @@ if [ ${?} -eq 0 ]; then while read L; do if [[ ${L} =~ ${R1} ]]; then
 		case "${HTYP}" in
 			"linux")
 				case "${STYP}" in
-					"scp" | "rsync")
+					"scp" | "rsync" | "rsyncsudo")
 						size=$(du -bs "${GITDIR}"/"${HOST}" | cut -f 1);
 						if [ ${size} -ge 5000 ]; then
 							echo "OK: "${HOST}"";
@@ -232,7 +311,7 @@ else
 	echo "ERROR: Wrong device's string: "${L}""
 	RS=1;
 fi;
-done < <(egrep -v "^( +)?#.*$|^$" "${DEVFILE}" | sort -u);
+done < <((if [ -z "${DEVFILEPASS}" ]; then cat "${DEVFILE}"; else "${OPENSSL}" enc -in "${DEVFILE}" -d -aes-256-cbc -md SHA256 -pass pass:"${DEVFILEPASS}"; fi;) | egrep -v "^( +)?#.*$|^$" | sort -u | sort -t@ -n);
 if [ ${CHANGES} -eq 1 ]; then
 	git -C "${GITDIR}" commit -m "$(hostname).$(dnsdomainname) $(date +%Y-%m-%d_%H.%M.%S) ${CMNT}" && git -C "${GITDIR}" push;
 fi;
